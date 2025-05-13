@@ -1,1 +1,104 @@
+blueprint:
+  name: Notify Lowest Electricity Price Block
+  description: >-
+    Sends a notification when the lowest average electricity price over a
+    configurable block of hours (e.g., 4 hours) occurs within a specified time window.
+  domain: automation
+  input:
+    price_sensor:
+      name: Electricity Price Sensor
+      description: Sensor providing raw_today attribute with hourly prices.
+      selector:
+        entity:
+          domain: sensor
+    notification_services:
+      name: Notification Services
+      description: >-
+        List of notify services to send the message to (e.g., telegram).
+      selector:
+        target:
+          entity:
+            domain: notify
+    start_hour:
+      name: Window Start Hour
+      description: Lower bound of hour window (inclusive, 0-23).
+      default: 8
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+    end_hour:
+      name: Window End Hour
+      description: Upper bound of hour window (inclusive, 0-23).
+      default: 23
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+    block_length:
+      name: Block Length (hours)
+      description: Number of consecutive hours for averaging.
+      default: 4
+      selector:
+        number:
+          min: 1
+          max: 24
+          step: 1
+    trigger_time:
+      name: Trigger Time
+      description: Time of day to evaluate prices and send notifications.
+      default: '07:00:00'
+      selector:
+        time: {}
+
+trigger:
+  - platform: time
+    at: !input trigger_time
+
+action:
+  - alias: "Set variables"
+    variables:
+      raw_prices: "{{ state_attr(input.price_sensor, 'raw_today') }}"
+      filtered: >-
+        {% set out = [] %}
+        {% for hour in raw_prices %}
+          {% if hour.start is defined and hour.start != '' %}
+            {% set h = hour.start | as_timestamp(default=0) | timestamp_custom('%H') | int %}
+            {% if input.start_hour <= h <= input.end_hour %}
+              {% set out = out + [hour] %}
+            {% endif %}
+          {% endif %}
+        {% endfor %}
+        {{ out }}
+      best_block: >-
+        {% set best = [] %}
+        {% set lowest = none %}
+        {% for i in range(0, filtered | length - input.block_length + 1) %}
+          {% set blk = filtered[i:i + input.block_length] %}
+          {% set avg = (blk | map(attribute='value') | list | sum) / input.block_length %}
+          {% if lowest is none or avg < lowest %}
+            {% set lowest = avg %}
+            {% set best = blk %}
+          {% endif %}
+        {% endfor %}
+        {{ best }}
+  - alias: "Ensure block found"
+    condition: template
+    value_template: "{{ best_block | length >= input.block_length }}"
+  - alias: "Set details"
+    variables:
+      start_time: "{{ best_block[0].start[11:16] }}"
+      end_time: "{{ best_block[-1].end[11:16] }}"
+      avg_price: >-
+        {{ ((best_block | map(attribute='value') | list | sum) / input.block_length) | round(2) }}
+  - alias: "Send Notifications"
+    service: notify.notify
+    data:
+      target: !input notification_services
+      message: >-
+        🔋 Laveste strømpris i dag for en {{ input.block_length }}-timers periode er fra
+        {{ start_time }} til {{ end_time }}. Gjennomsnittspris: {{ avg_price }} øre/kWh.
+mode: single
 
